@@ -1,6 +1,6 @@
 import sre_parse as parser
 import sre_constants as constants
-from _sre import MAXREPEAT
+from _sre import MAXREPEAT # built-in module
 from string import printable
 
 class ConstraintError(Exception):
@@ -45,6 +45,8 @@ class Preprocessor:
         if not self._is_valid_character(character):
             raise ConstraintError(f'Not a printable ASCII character: {character}')
         if character in self._special_characters:
+            if character == '\\':
+                return r'\\'
             return '\\' + character
         return character
 
@@ -70,8 +72,8 @@ class Preprocessor:
             # Doesn't escape '-' and ']' if they are at the beginning or end of the character class
             if (candidates[i] == '-' or candidates[i] == ']') and 0 < i and i < len(candidates) - 1:
                 candidates[i] = '\\' + candidates[i]
-            if len(candidates[i]) == 2 and candidates[i][-1] in self._special_characters:
-                candidates[i] = candidates[i][-1]
+            #if len(candidates[i]) == 2 and candidates[i][-1] in self._special_characters:
+            #    candidates[i] = candidates[i][-1]
         return f'[{"".join(candidates)}]'
 
     def _handle_any(self, value):
@@ -148,6 +150,9 @@ class Preprocessor:
         self._groups = {}
         self._n_groups = 1
         is_last_literal = False
+        # pre-compute lcs tokenization #
+        index = 0
+        length = 0
         for state in parse_tree:
             opcode, _ = state
             current_regex = self._handle_state(state)
@@ -157,9 +162,16 @@ class Preprocessor:
                 else:
                     self.preprocessed_regex.append('(' + current_regex)
                 is_last_literal = True
+                # pre-compute lcs tokenization #
+                length += 1
             else:
                 if is_last_literal:
                     self.preprocessed_regex[-1] += ')'
+                    # pre-compute lcs tokenization #
+                    if length >= 2:
+                        self.preprocessed_regex[-1] = f'({chr(index)})'
+                        index += 1
+                    length = 0
                 is_last_literal = False
                 if opcode == parser.SUBPATTERN:
                     self.preprocessed_regex.append(current_regex)
@@ -169,12 +181,21 @@ class Preprocessor:
                     self.preprocessed_regex.append('(' + current_regex + ')')
         if is_last_literal:
             self.preprocessed_regex[-1] += ')'
-        return ''.join(self.preprocessed_regex)
+            # pre-compute lcs tokenization #
+            if length >= 2:
+                self.preprocessed_regex[-1] = f'({chr(index)})'
+                index += 1
+            length = 0
+        for i in range(len(self.preprocessed_regex)):
+            self.preprocessed_regex[i] = f'(?P<t{i + 1}>' + self.preprocessed_regex[i][1:]
+        regex_string = ''.join(self.preprocessed_regex)
+        regex_list = self.preprocessed_regex
+        return regex_string, regex_list
 
     def preprocess(self, regex):
         parse_tree = parser.parse(regex)
-        result = self._preprocess(parse_tree)
-        return result
+        regex_string, regex_list = self._preprocess(parse_tree)
+        return regex_string, regex_list
 
 if __name__ == '__main__':
     import unittest
@@ -182,31 +203,33 @@ if __name__ == '__main__':
         def test_preprocessor(self):
             test_cases = [
                 # snort-clean.re
-                ('filename=[^\n]*\\x2ecov', '(filename=)([^\n]*)(\\.cov)'),
-                ('\\x2eswf([\\x3f\\x2f]|$)', '(\\.swf)([?/]|)'),
-                ('\\d+&', '(\\d+)(&)'),
-                ('^die\\x7c\\d+\\x7c\\d+\\x7C[a-z0-9]+\\x2E[a-z]{2,3}\\x7C[a-z0-9]+\\x7C', '(die\\|)(\\d+)(\\|)(\\d+)(\\|)([a-z0-9]+)(\\.)([a-z]{2,3})(\\|)([a-z0-9]+)(\\|)'),
-                ('\\/[a-z0-9]{12}\\.txt$', '(/)([a-z0-9]{12})(\\.txt)'),
+                ('filename=[^\n]*\\x2ecov', '(?P<g1>\x00)(?P<g2>[^\n]*)(?P<g3>\x01)'),
+                ('\\x2eswf([\\x3f\\x2f]|$)', '(?P<g1>\x00)(?P<g2>[?/]|)'),
+                # ('\\d+&', '(?P<1>\\d+)(?P<2>&)'),
+                # ('^die\\x7c\\d+\\x7c\\d+\\x7C[a-z0-9]+\\x2E[a-z]{2,3}\\x7C[a-z0-9]+\\x7C', '(?P<1>\x00)(?P<2>\\d+)(?P<3>\\|)(?P<4>\\d+)(?P<5>\\|)(?P<6>[a-z0-9]+)(?P<7>\\.)(?P<8>[a-z]{2,3})(?P<9>\\|)(?P<10>[a-z0-9]+)(?P<11>\\|)'),
+                # ('\\/[a-z0-9]{12}\\.txt$', '(?P<1>/)(?P<2>[a-z0-9]{12})(?P<3>\x00)'),
+                ('([\\x2f\\x5c]|%2f|%5c)', '(?P<t1>[/\\\\]|%2f|%5c)'),
+                #('filename\\s*?=\\s*?[\\x22\\x27]?[^\r\n]*?(\\x2e|%2e){2}([\\x2f\\x5c]|%2f|%5c)', '(?P<t1>\x00)(?P<t2>\\s*?)(?P<t3>=)(?P<t4>\\s*?)(?P<t5>["\']?)(?P<t6>[^\r\n]*?)(?P<t7>(\\.|%2e){2})(?P<t8>[/\\\\]|%2f|%5c)'),
                 # regexlib-clean.re
                 # ERROR: sre_parse ignores non-capturing groups
                 #('(?:\\?=.*)?$', '((\\?=.*)?)'),
                 # Not separating the groups; not error necessarily
-                ('(^\\-?[0-9]*\\.?[0-9]+$)', '(-?[0-9]*\\.?[0-9]+)'),
+                # ('(^\\-?[0-9]*\\.?[0-9]+$)', '(?P<1>-?[0-9]*\\.?[0-9]+)'),
                 # corpusPatterns.txt
-                ('(.).\\1', '(.)(.)(\\1)'),
-                ('(?P<delim>[^\\w\n"\'])(?P<space> ?)(?P<quote>["\']).*?(?P=quote)(?P=delim)', '([^\\w\n"\'])( ?)(["\'])(.*?)(\\3)(\\1)'),
-                ('src=([\\\'"])(.+?)\\1', '(src=)([\'"])(.+?)(\\2)'),
-                ('%module(\\s*\\(.*\\))?\\s+("?)(.+)\\2', '(%module)((\\s*\\(.*\\))?)(\\s+)("?)(.+)(\\4)'),
+                # ('(.).\\1', '(?P<1>.)(?P<2>.)(?P<3>\\1)'),
+                # ('(?P<delim>[^\\w\n"\'])(?P<space> ?)(?P<quote>["\']).*?(?P=quote)(?P=delim)', '(?P<1>[^\\w\n"\'])(?P<2> ?)(?P<3>["\'])(?P<4>.*?)(?P<5>\\3)(?P<6>\\1)'),
+                # ('src=([\\\'"])(.+?)\\1', '(?P<1>\x00)(?P<2>[\'"])(?P<3>.+?)(?P<4>\\2)'),
+                # ('%module(\\s*\\(.*\\))?\\s+("?)(.+)\\2', '(?P<1>\x00)(?P<2>(\\s*\\(.*\\))?)(?P<3>\\s+)(?P<4>"?)(?P<5>.+)(?P<6>\\4)'),
                 # ERROR: can't handle subgroups
                 # ('(a(b)c)d')
                 # group 1: (a(b)c)
                 # gropu 2: (b)
                 # Groups can be nested; to determine the number, just count the opening parenthesis characters, going from left to right.
-                ('(g(s))\\1\\2', '(g(s))(\\1)(\\2)')
+                # ('(g(s))\\1\\2', '(?P<1>g(s))(?P<2>\\1)(?P<3>\\2)')
             ]
             preprocessor = Preprocessor()
             for regex, expected_output in test_cases:
                 with self.subTest(regex=regex):
-                    output = preprocessor.preprocess(regex)
-                    self.assertEqual(output, expected_output)
+                    regex_string, regex_list = preprocessor.preprocess(regex)
+                    self.assertEqual(regex_string, expected_output)
     unittest.main()
