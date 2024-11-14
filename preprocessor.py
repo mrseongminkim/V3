@@ -1,6 +1,7 @@
+import string
 import sre_parse as parser
 import sre_constants as constants
-from _sre import MAXREPEAT # built-in module
+from _sre import MAXREPEAT
 from string import printable
 
 class ConstraintError(Exception):
@@ -11,12 +12,12 @@ class Preprocessor:
         self._max_repeat = MAXREPEAT
         self._special_characters = r'.^$*+?\\[|()'
         self._categories = {
-            "category_digit": r'\d',
-            "category_not_digit": r'\D',
-            "category_space": r'\s',
-            "category_not_space": r'\S',
-            "category_word": r'\w',
-            "category_not_word": r'\W',
+            'category_digit': r'\d',
+            'category_word': r'\w',
+            'category_space': ' ',
+            'category_not_word': r'\W',
+            'category_not_digit': r'\D',
+            'category_not_space': r'\S',
         }
         self._cases = {
             'literal': lambda x: self._handle_literal(x),
@@ -40,10 +41,18 @@ class Preprocessor:
         return character in printable
 
     def _handle_literal(self, value):
-        # value: integer
+        '''
+        0. if character is not a printable ASCII character, raise an error
+        1. if character is a whitespace character, return ' '
+        2. if character is a special character, return '\\' + character
+        3. otherwise, return character
+        value: integer
+        '''
         character = chr(value)
         if not self._is_valid_character(character):
             raise ConstraintError(f'Not a printable ASCII character: {character}')
+        if character in string.whitespace:
+            return ' '
         if character in self._special_characters:
             if character == '\\':
                 return r'\\'
@@ -51,6 +60,7 @@ class Preprocessor:
         return character
 
     def _handle_not_literal(self, value):
+        raise ConstraintError(f'Can\'t handle negation')
         # value: integer
         character = chr(value)
         if not self._is_valid_character(character):
@@ -63,17 +73,15 @@ class Preprocessor:
         return ''
 
     def _handle_in(self, value):
-        # value: list of states
+        '''
+        0. if it's character class, return the character class without enclosing brackets
+        1. if it's negated character class, raise ConstraintError
+        value: list of states
+        '''
         candidates = [self._handle_state(i) for i in value]
         # Named character classes
         if len(candidates) == 1 and candidates[0] in self._categories.values():
             return candidates[0]
-        for i in range(len(candidates)):
-            # Doesn't escape '-' and ']' if they are at the beginning or end of the character class
-            if (candidates[i] == '-' or candidates[i] == ']') and 0 < i and i < len(candidates) - 1:
-                candidates[i] = '\\' + candidates[i]
-            #if len(candidates[i]) == 2 and candidates[i][-1] in self._special_characters:
-            #    candidates[i] = candidates[i][-1]
         return f'[{"".join(candidates)}]'
 
     def _handle_any(self, value):
@@ -89,7 +97,10 @@ class Preprocessor:
     
     def _handle_category(self, value):
         # value: category
-        return self._categories[str(value).lower()]
+        category = self._categories[str(value).lower()]
+        if category in (r'\D', r'\W', r'\S'):
+            raise ConstraintError(f'Negated character class: {category}')
+        return category
 
     def _handle_branch(self, value):
         # value: list of list of states
@@ -119,6 +130,7 @@ class Preprocessor:
         return f'\\{self._groups[value]}'
 
     def _handle_repeat(self, start_range, end_range, value, is_min=False):
+        # do not support possessive quantifiers
         auxilary = '?' if is_min else ''
         if start_range == 1 and end_range == self._max_repeat:
             operator = '+' + auxilary
@@ -139,6 +151,7 @@ class Preprocessor:
 
     def _handle_negate(self, value):
         # value: None
+        raise ConstraintError(f'Negation: ^')
         return '^'
 
     def _handle_state(self, state):
@@ -150,7 +163,7 @@ class Preprocessor:
         self._groups = {}
         self._n_groups = 1
         is_last_literal = False
-        # pre-compute lcs tokenization #
+        # pre-compute ground-truth lcs tokenization #
         index = 0
         length = 0
         for state in parse_tree:
@@ -186,8 +199,10 @@ class Preprocessor:
                 self.preprocessed_regex[-1] = f'({chr(index)})'
                 index += 1
             length = 0
+        if len(self.preprocessed_regex) > 12:
+            raise ConstraintError('Number of subregexes exceeds the limit')
         for i in range(len(self.preprocessed_regex)):
-            self.preprocessed_regex[i] = f'(?P<t{i + 1}>' + self.preprocessed_regex[i][1:]
+            self.preprocessed_regex[i] = f'(?P<g{i + 1}>' + self.preprocessed_regex[i][1:]
         regex_string = ''.join(self.preprocessed_regex)
         regex_list = self.preprocessed_regex
         return regex_string, regex_list
@@ -203,29 +218,30 @@ if __name__ == '__main__':
         def test_preprocessor(self):
             test_cases = [
                 # snort-clean.re
-                ('filename=[^\n]*\\x2ecov', '(?P<g1>\x00)(?P<g2>[^\n]*)(?P<g3>\x01)'),
-                ('\\x2eswf([\\x3f\\x2f]|$)', '(?P<g1>\x00)(?P<g2>[?/]|)'),
-                # ('\\d+&', '(?P<1>\\d+)(?P<2>&)'),
-                # ('^die\\x7c\\d+\\x7c\\d+\\x7C[a-z0-9]+\\x2E[a-z]{2,3}\\x7C[a-z0-9]+\\x7C', '(?P<1>\x00)(?P<2>\\d+)(?P<3>\\|)(?P<4>\\d+)(?P<5>\\|)(?P<6>[a-z0-9]+)(?P<7>\\.)(?P<8>[a-z]{2,3})(?P<9>\\|)(?P<10>[a-z0-9]+)(?P<11>\\|)'),
-                # ('\\/[a-z0-9]{12}\\.txt$', '(?P<1>/)(?P<2>[a-z0-9]{12})(?P<3>\x00)'),
-                ('([\\x2f\\x5c]|%2f|%5c)', '(?P<t1>[/\\\\]|%2f|%5c)'),
-                #('filename\\s*?=\\s*?[\\x22\\x27]?[^\r\n]*?(\\x2e|%2e){2}([\\x2f\\x5c]|%2f|%5c)', '(?P<t1>\x00)(?P<t2>\\s*?)(?P<t3>=)(?P<t4>\\s*?)(?P<t5>["\']?)(?P<t6>[^\r\n]*?)(?P<t7>(\\.|%2e){2})(?P<t8>[/\\\\]|%2f|%5c)'),
+                # ('filename=[^\n]*\\x2ecov', '(?P<g1>\x00)(?P<g2>[^\n]*)(?P<g3>\x01)'),
+                # ('\\x2eswf([\\x3f\\x2f]|$)', '(?P<g1>\x00)(?P<g2>[\?/]|)'),
+                # ('\\d+&', '(?P<g1>\\d+)(?P<g2>&)'),
+                # ('\\/[a-z0-9]{12}\\.txt$', '(?P<g1>/)(?P<g2>[a-z0-9]{12})(?P<g3>\x00)'),
+                # ('([\\x2f\\x5c]|%2f|%5c)', '(?P<g1>[/\\\\]|%2f|%5c)'),
+                # ('filename\\s*?=\\s*?[\\x22\\x27]?[^\r\n]*?(\\x2e|%2e){2}([\\x2f\\x5c]|%2f|%5c)', '(?P<g1>\x00)(?P<g2> *?)(?P<g3>=)(?P<g4> *?)(?P<g5>["\']?)(?P<g6>[^  ]*?)(?P<g7>(\\.|%2e){2})(?P<g8>[/\\\\]|%2f|%5c)'),
+
                 # regexlib-clean.re
                 # ERROR: sre_parse ignores non-capturing groups
                 #('(?:\\?=.*)?$', '((\\?=.*)?)'),
                 # Not separating the groups; not error necessarily
                 # ('(^\\-?[0-9]*\\.?[0-9]+$)', '(?P<1>-?[0-9]*\\.?[0-9]+)'),
+                
                 # corpusPatterns.txt
-                # ('(.).\\1', '(?P<1>.)(?P<2>.)(?P<3>\\1)'),
-                # ('(?P<delim>[^\\w\n"\'])(?P<space> ?)(?P<quote>["\']).*?(?P=quote)(?P=delim)', '(?P<1>[^\\w\n"\'])(?P<2> ?)(?P<3>["\'])(?P<4>.*?)(?P<5>\\3)(?P<6>\\1)'),
-                # ('src=([\\\'"])(.+?)\\1', '(?P<1>\x00)(?P<2>[\'"])(?P<3>.+?)(?P<4>\\2)'),
-                # ('%module(\\s*\\(.*\\))?\\s+("?)(.+)\\2', '(?P<1>\x00)(?P<2>(\\s*\\(.*\\))?)(?P<3>\\s+)(?P<4>"?)(?P<5>.+)(?P<6>\\4)'),
-                # ERROR: can't handle subgroups
-                # ('(a(b)c)d')
-                # group 1: (a(b)c)
-                # gropu 2: (b)
-                # Groups can be nested; to determine the number, just count the opening parenthesis characters, going from left to right.
-                # ('(g(s))\\1\\2', '(?P<1>g(s))(?P<2>\\1)(?P<3>\\2)')
+                ('([A-Z]+)([A-Z][a-z])', '(?P<g1>[A-Z]+)(?P<g2>[A-Z][a-z])'),
+                ('<!-- REPORTPROBLEM (.*?)-->', '(?P<g1>\x00)(?P<g2>.*?)(?P<g3>\x01)'),
+                ('Funcname|Classless_Function', '(?P<g1>Funcname|Classless_Function)'),
+                ('[A-Z]+', '(?P<g1>[A-Z]+)'),
+                ('\\.php$', '(?P<g1>\x00)'),
+                ('\\s+(\\r?\\n)$', '(?P<g1> +)(?P<g2> ? )'),
+                ('^(?P<major>\\d+)\\.(?P<minor>\\d+)(\\.(?P<subminor>\\d+))?', '(?P<g1>\\d+)(?P<g2>\\.)(?P<g3>\\d+)(?P<g4>(\\.(\\d+))?)'),
+                ('^Accession Number:', '(?P<g1>\x00)'),
+                ('^\\s*(\\w+)\\s*:', '(?P<g1> *)(?P<g2>\\w+)(?P<g3> *)(?P<g4>:)'),
+                ('src=([\\\'"])(.+?)\\1', '(?P<g1>\x00)(?P<g2>[\'"])(?P<g3>.+?)(?P<g4>\\2)'),
             ]
             preprocessor = Preprocessor()
             for regex, expected_output in test_cases:
