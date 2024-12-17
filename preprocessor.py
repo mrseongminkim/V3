@@ -1,7 +1,7 @@
 import string
 import sre_parse as parser
 import sre_constants as constants
-from _sre import MAXREPEAT
+from _sre import MAXREPEAT # type: ignore
 from string import printable
 
 class ConstraintError(Exception):
